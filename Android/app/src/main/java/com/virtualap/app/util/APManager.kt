@@ -15,7 +15,7 @@ data class APStatus(
     val band: String? = null,
     val channel: String? = null,
     val width: String? = null,          // actual channel width in MHz while running
-    val security: String? = null,       // open | wpa2 | wpa2wpa3 | wpa3 while running
+    val security: String? = null,       // open | wpawpa2 | wpa2 | wpa2wpa3 | wpa3 while running
     val upstream: String? = null,
     val upstreamIface: String? = null,
     val upstreamTable: String? = null,

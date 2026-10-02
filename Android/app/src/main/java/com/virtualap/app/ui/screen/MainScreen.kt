@@ -323,6 +323,7 @@ private fun AccessPointCard(vm: APViewModel) {
         val securityNames = mapOf(
             "open" to stringResource(R.string.security_open),
             "wpa2" to stringResource(R.string.security_wpa2),
+            "wpawpa2" to stringResource(R.string.security_wpa_wpa2),
             "wpa2wpa3" to stringResource(R.string.security_wpa2_wpa3),
             "wpa3" to stringResource(R.string.security_wpa3)
         )
@@ -338,6 +339,9 @@ private fun AccessPointCard(vm: APViewModel) {
         // devices; warn so users know to fall back to WPA2.
         if (vm.config.security == "wpa2wpa3" || vm.config.security == "wpa3") {
             Caption(stringResource(R.string.security_wpa3_hint))
+        }
+        if (vm.config.security == "wpawpa2") {
+            Caption(stringResource(R.string.security_wpa_wpa2_hint))
         }
 
         // Open networks have no passphrase, so the field goes away with them.
@@ -597,6 +601,7 @@ private fun ActiveNetworkCard(vm: APViewModel) {
     ).joinToString(" \u00B7 ")
     val security = when (status.security) {
         "open" -> stringResource(R.string.security_open)
+        "wpawpa2" -> stringResource(R.string.security_wpa_wpa2)
         "wpa2wpa3" -> stringResource(R.string.security_wpa2_wpa3)
         "wpa3" -> stringResource(R.string.security_wpa3)
         "wpa2" -> stringResource(R.string.security_wpa2)

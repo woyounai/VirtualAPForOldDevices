@@ -13,6 +13,8 @@ BASE_DIR="/data/local/virtualap"
 BIN_DIR="${BASE_DIR}/bin"
 RUN_DIR="${BASE_DIR}/run"
 CONF_FILE="${BASE_DIR}/ap.conf"
+# An explicitly created shared config takes precedence over the app-local one.
+[ -f "/data/local/ap.conf" ] && CONF_FILE="/data/local/ap.conf"
 STATE_FILE="${BASE_DIR}/run.state"
 LOG_FILE="${BASE_DIR}/logs/ap.log"
 # Per-daemon logs so a crash/failure leaves a trace instead of vanishing (both
@@ -57,8 +59,8 @@ CHANNEL=""
 WIDTH="auto"
 DNS_SERVERS=""
 HIDDEN="0"
-# Security: open | wpa2 | wpa2wpa3 | wpa3. PMF (ieee80211w) only applies to wpa2
-# (0/1); wpa2wpa3 forces 1 and wpa3 forces 2 per the standard.
+# Security: open | wpawpa2 | wpa2 | wpa2wpa3 | wpa3. PMF (ieee80211w) only
+# applies to wpa2 (0/1); wpawpa2 disables it, wpa2wpa3 forces 1, wpa3 forces 2.
 SECURITY="wpa2"
 PMF="0"
 
@@ -620,6 +622,15 @@ vht_oper_chwidth=0"
         open)
             sec=""
             ;;
+        wpawpa2)
+            # Legacy clients need WPA and TKIP; leave CCMP available to newer ones.
+            sec="wpa=3
+wpa_passphrase=$PASSWORD
+wpa_key_mgmt=WPA-PSK
+wpa_pairwise=CCMP TKIP
+rsn_pairwise=CCMP TKIP
+ieee80211w=0"
+            ;;
         wpa3)
             sec="wpa=2
 wpa_passphrase=$PASSWORD
@@ -1038,9 +1049,10 @@ cmd_status() {
             else $ECHO "width=20"; fi
         fi
     fi
-    # Active security mode, derived from the live conf's key-mgmt line.
+    # Read the live protocol and key management, not the next saved config.
     if [ "$running" = "1" ] && [ -f "$RUN_DIR/hostapd.conf" ]; then
         if   ! $GREP -q '^wpa=' "$RUN_DIR/hostapd.conf"; then $ECHO "security=open"
+        elif $GREP -q '^wpa=3$' "$RUN_DIR/hostapd.conf"; then $ECHO "security=wpawpa2"
         elif $GREP -q '^wpa_key_mgmt=WPA-PSK SAE' "$RUN_DIR/hostapd.conf"; then $ECHO "security=wpa2wpa3"
         elif $GREP -q '^wpa_key_mgmt=SAE'         "$RUN_DIR/hostapd.conf"; then $ECHO "security=wpa3"
         else $ECHO "security=wpa2"; fi
@@ -1110,7 +1122,8 @@ print_usage() {
     $ECHO "  -d <dns>       Comma-separated list of upstream DNS servers"
     $ECHO "  -w <iface>     Physical WiFi interface (default: wlan0)"
     $ECHO "  -H <0|1>       Hide SSID (0 = visible [default], 1 = hidden)"
-    $ECHO "  -A <mode>      Security: open, wpa2 (default), wpa2wpa3, wpa3"
+    $ECHO "  -A <mode>      Security: open, wpawpa2, wpa2 (default), wpa2wpa3, wpa3"
+    $ECHO "                 wpawpa2: WPA/WPA2 compatibility with CCMP and TKIP"
     $ECHO "  -M <0|1>       Protected Management Frames for wpa2 (0=off [default],"
     $ECHO "                 1=on); forced on for wpa2wpa3, required for wpa3"
     $ECHO "  -K <container> Managed mode: hand the AP's LAN to a Droidspaces"

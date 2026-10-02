@@ -11,7 +11,7 @@ data class APConfig(
     val gateway: String = "",        // blank = DEFAULT_GATEWAY
     val dnsServers: String = "",
     val hidden: Boolean = false,
-    val security: String = "wpa2",   // open | wpa2 | wpa2wpa3 | wpa3
+    val security: String = "wpa2",   // open | wpawpa2 | wpa2 | wpa2wpa3 | wpa3
     val pmf: Boolean = false,        // Protected Management Frames (wpa2 only)
     val containerMode: Boolean = false,
     val containerName: String = ""

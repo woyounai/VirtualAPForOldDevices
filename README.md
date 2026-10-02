@@ -28,13 +28,49 @@ Unlike the stock Android hotspot, VirtualAP gives you a fixed LAN, control over 
 * **Wi-Fi repeater** - stay connected to a Wi-Fi network and rebroadcast it as a hotspot at the same time, no extra hardware.
 * **VPN hotspot** - set a VPN tunnel as the upstream and every connected device is transparently routed through it.
 * **Bands & channel control** - 2.4 GHz or 5 GHz, manual or auto channel, and 20/40/80 MHz width on 5 GHz (with safe fallback when the chip or channel can't do it).
-* **Security modes** - Open, WPA2-Personal, WPA2/WPA3 transition, or WPA3-Personal (SAE), plus an optional Protected Management Frames (802.11w) toggle.
+* **Security modes** - Open, WPA/WPA2 compatibility (CCMP + TKIP), WPA2-Personal, WPA2/WPA3 transition, or WPA3-Personal (SAE), plus an optional Protected Management Frames (802.11w) toggle.
 * **Hidden SSID** - broadcast or hide the network name.
 * **DHCP + DNS** - served locally by `dnsmasq`, with optional custom upstream DNS servers.
 * **Same-channel concurrency** - the AP follows the Wi-Fi station's current channel, which is what most phone chips require and avoids 5 GHz beaconing failures.
 * **Managed mode** - hand the hotspot's LAN to a running [Droidspaces](https://github.com/ravindu644/Droidspaces) container, letting OpenWrt (or any container) own DHCP/DNS/NAT/firewall.
 * **Runs directly on Android** - `hostapd`, `dnsmasq`, `iw`, and `busybox` ship as fully-static ARM binaries. No chroot, no namespaces, no Magisk module, no reboot. Routing and firewalling use Android's own `ip`/`iptables`.
 * **Self-managing app** - checks root on every launch, re-deploys the backend automatically after an update, and streams the live backend log to a built-in terminal view.
+
+## WPA/WPA2 compatibility
+
+For older clients, select **WPA/WPA2-Personal (compatibility)** in the Android
+app's Security dropdown. It uses WPA-Personal and WPA2-Personal together, with
+both CCMP and TKIP allowed for each protocol. PMF is disabled in this mode.
+TKIP is less secure and can reduce throughput; use WPA2-Personal unless a client
+needs the legacy mode. The Wi-Fi driver must also support TKIP.
+
+For shell-driven starts, set the existing security key in
+`/data/local/virtualap/ap.conf`:
+
+```sh
+SECURITY='wpawpa2'
+```
+
+`/data/local/ap.conf` is also supported. If that file exists, it takes precedence
+and settings are loaded from and saved to it. Otherwise the original
+`/data/local/virtualap/ap.conf` remains in use. Keep the config root-owned and
+not writable by other users, since the backend sources it as a shell file.
+CLI flags override the saved config, so app-driven starts use the mode selected
+in the app. Restart the hotspot after changing the mode.
+
+The equivalent CLI option is `start-ap start -A wpawpa2`. This produces:
+
+```ini
+wpa=3
+wpa_key_mgmt=WPA-PSK
+wpa_pairwise=CCMP TKIP
+rsn_pairwise=CCMP TKIP
+ieee80211w=0
+```
+
+Run the security regression checks on a development machine with
+`python3 tests/test_security.py`. They exercise config generation, persistence,
+CLI precedence and status without starting a radio or modifying routing.
 
 ## Use Cases
 

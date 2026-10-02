@@ -41,6 +41,7 @@
     <string name="channel_label">Channel</string>
     <string name="width_label">Channel Width</string>
     <string name="security_label">Security</string>
+    <string name="security_wpa_wpa2_hint">Allows WPA/WPA2 with CCMP and TKIP for older clients. TKIP is less secure and can reduce speed. Protected Management Frames are disabled in this mode.</string>
     <string name="security_wpa3_hint">WPA3 may not work on every device. Some phones bring up the hotspot but clients fail to connect or get no IP, and older client devices may not join at all. Use WPA2-Personal for the best compatibility.</string>
     <string name="upstream_interface_label">Upstream Interface</string>
     <string name="upstream_auto">Auto (recommended)</string>
@@ -101,6 +102,7 @@
     <!-- Backend option labels -->
     <string name="security_open">Open</string>
     <string name="security_wpa2">WPA2-Personal</string>
+    <string name="security_wpa_wpa2">WPA/WPA2-Personal (compatibility)</string>
     <string name="security_wpa2_wpa3">WPA2/WPA3-Personal</string>
     <string name="security_wpa3">WPA3-Personal</string>
     <string name="band_2ghz">2.4 GHz</string>
