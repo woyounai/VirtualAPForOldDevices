@@ -32,6 +32,7 @@ hostapd_cli() { "$BIN_DIR/hostapd_cli" -s "$RUN_DIR" "$@"; }
 
 IP="/system/bin/ip"
 IPT="/system/bin/iptables"
+IP6T="/system/bin/ip6tables"
 
 # Network constants
 AP_IFACE="ap0"
@@ -49,6 +50,11 @@ PRIO_FROM_AP=7010     # from all iif ap0 lookup <table>  (upstream steering)
 # rule 6095 instead of leaking out WAN via 6100.
 ANDROID_LOCAL_NETWORK_TABLE=97
 
+# Droidspaces' fixed NAT subnets. In managed mode the hotspot's traffic reaches
+# the host from the container's address in these.
+DS_NAT_NET="172.28.0.0/16"
+DS_NAT_NET6="fd64:7370::/48"
+
 # Defaults (overridden by ap.conf, then by CLI flags)
 PHY_IFACE="wlan0"
 UPSTREAM="auto"
@@ -63,6 +69,9 @@ HIDDEN="0"
 # applies to wpa2 (0/1); wpawpa2 disables it, wpa2wpa3 forces 1, wpa3 forces 2.
 SECURITY="wpa2"
 PMF="0"
+# Rewrite the TTL of forwarded packets so tethered traffic looks like the phone's
+# own to the operator. Needs the kernel's TTL target, so it is best effort.
+TTL_FIX="0"
 
 # --- Droidspaces container integration (managed mode) ---
 # When CONTAINER is set: ap0 becomes a bridged port on VAP_BRIDGE, a veth peer
@@ -145,6 +154,7 @@ DNS_SERVERS='$(sq "$DNS_SERVERS")'
 HIDDEN='$(sq "$HIDDEN")'
 SECURITY='$(sq "$SECURITY")'
 PMF='$(sq "$PMF")'
+TTL_FIX='$(sq "$TTL_FIX")'
 CONTAINER='$(sq "$CONTAINER")'
 EOF
 }
@@ -307,6 +317,11 @@ phy_info() {
 
 phy_supports_vht()  { phy_info | $GREP -q 'VHT Capabilities'; }
 phy_supports_ht40() { phy_info | $GREP -q 'HT20/HT40'; }
+# The same question for the 2.4GHz band alone (Band 1). Plenty of phone chips
+# do 40MHz on 5GHz only.
+phy_supports_ht40_24() {
+    phy_info | $SED -n '/Band 1:/,/Band 2:/p' | $GREP -q 'HT20/HT40'
+}
 
 # 80MHz block center channel index (vht_oper_centr_freq_seg0_idx) for a primary
 # 5GHz channel. Empty if the channel is not part of a valid 80MHz block.
@@ -336,8 +351,16 @@ ht40_dir() {
 EFFECTIVE_WIDTH="20"
 pick_width() {
     if [ "$BAND" != "5" ]; then
-        # 2.4GHz: HT40 is unreliable/discouraged in practice - stay at 20MHz.
-        EFFECTIVE_WIDTH="20"; return
+        # 2.4GHz: a 40MHz channel takes up most of the band and crowds out the
+        # neighbours and Bluetooth, so "auto" stays at 20MHz and 40 is only used
+        # when asked for by name. Channel 14 has no room for a second channel.
+        EFFECTIVE_WIDTH="20"
+        if [ "$WIDTH" = "40" ] && [ "$CHANNEL" -le 13 ] && phy_supports_ht40_24; then
+            EFFECTIVE_WIDTH="40"
+        fi
+        [ "$EFFECTIVE_WIDTH" != "$WIDTH" ] && [ "$WIDTH" != "auto" ] && \
+            warn "Requested ${WIDTH}MHz but using ${EFFECTIVE_WIDTH}MHz (channel/chip limit)."
+        return
     fi
 
     # Widest the chip + channel can actually do. A non-empty vht_seg0 means the
@@ -461,6 +484,48 @@ stop_daemons() {
     [ -f "$RUN_DIR/dnsmasq.pid" ] && $KILL "$($CAT "$RUN_DIR/dnsmasq.pid")" 2>/dev/null
     $RM -f "$RUN_DIR/hostapd.pid" "$RUN_DIR/dnsmasq.pid" \
            "$RUN_DIR/hostapd.conf" "$RUN_DIR/dnsmasq.conf"
+}
+
+# Live test for the TTL target: ask the kernel to take the real rule, in a
+# chain nothing jumps to, so no packet ever sees it. One test covers both a
+# kernel built without the target and an iptables binary without the extension.
+ttl_supported() {
+    local rc
+    "$IPT" -t mangle -N vap_ttl_probe 2>/dev/null
+    "$IPT" -t mangle -A vap_ttl_probe -j TTL --ttl-set 64 2>/dev/null; rc=$?
+    "$IPT" -t mangle -F vap_ttl_probe 2>/dev/null
+    "$IPT" -t mangle -X vap_ttl_probe 2>/dev/null
+    return $rc
+}
+
+# Our TTL rules live in a chain of their own, so clearing them never depends
+# on knowing which subnet they were written for.
+ttl_clear() {
+    local ipt
+    for ipt in "$IPT" "$IP6T"; do
+        while "$ipt" -t mangle -D FORWARD -j vap_ttl 2>/dev/null; do :; done
+        "$ipt" -t mangle -F vap_ttl 2>/dev/null
+        "$ipt" -t mangle -X vap_ttl 2>/dev/null
+    done
+}
+
+# $1 = IPv4 source subnet of the tethered traffic, $2 = IPv6 one (optional).
+# FORWARD only sees forwarded packets, after the kernel took its one off the
+# TTL, so the phone's own traffic is left alone and 64 is what leaves. Matching
+# the source keeps it to outbound packets: replies on their way back to the
+# clients come from the internet and keep the TTL they arrived with.
+ttl_apply() {
+    ttl_clear
+    "$IPT" -t mangle -N vap_ttl 2>/dev/null
+    "$IPT" -t mangle -A vap_ttl -s "$1" -j TTL --ttl-set 64 2>/dev/null \
+        && "$IPT" -t mangle -I FORWARD -j vap_ttl 2>/dev/null \
+        || { ttl_clear; return 1; }
+    # IPv6 calls the same field hop limit.
+    [ -n "$2" ] || return 0
+    "$IP6T" -t mangle -N vap_ttl 2>/dev/null
+    "$IP6T" -t mangle -A vap_ttl -s "$2" -j HL --hl-set 64 2>/dev/null \
+        && "$IP6T" -t mangle -I FORWARD -j vap_ttl 2>/dev/null
+    return 0
 }
 
 teardown() {
@@ -612,6 +677,15 @@ vht_oper_chwidth=0"
     else
         hw_mode="g"
         extra="ieee80211n=1"
+        # 40MHz: the second channel sits four above the primary for channels
+        # 1-7 and four below for 8-13, so the pair always stays inside the band.
+        # no_pri_sec_switch for the same reason as on 5GHz above.
+        if [ "$EFFECTIVE_WIDTH" = "40" ]; then
+            if [ "$CHANNEL" -le 7 ]; then dir='+'; else dir='-'; fi
+            extra="$extra
+no_pri_sec_switch=1
+ht_capab=[HT40$dir]"
+        fi
     fi
 
     # Security block. open = no encryption (no wpa lines). PMF (ieee80211w):
@@ -690,7 +764,7 @@ hostapd_try() {
 
 # Generate the conf at the picked width and launch hostapd once. pick_width has
 # already resolved EFFECTIVE_WIDTH to a width the chip + channel support (warning
-# on any downgrade), so there's no width fallback to attempt here.
+# on any downgrade), so the only width fallback here is 40MHz on 2.4GHz.
 # $1 = optional bridge name (managed mode), passed through to write_hostapd_conf.
 start_hostapd() {
     local hb="$1"
@@ -703,6 +777,14 @@ start_hostapd() {
     # Clean only hostapd's pidfile (the shared dnsmasq.conf must survive).
     [ -f "$RUN_DIR/hostapd.pid" ] && $KILL "$($CAT "$RUN_DIR/hostapd.pid")" 2>/dev/null
     $RM -f "$RUN_DIR/hostapd.pid"
+    # 40MHz on 2.4GHz is the one width the radio can advertise and the firmware
+    # still refuse, for instance while the phone's own Wi-Fi sits on a 20MHz
+    # network on the same channel. A hotspot at 20MHz beats no hotspot.
+    if [ "$BAND" != "5" ] && [ "$EFFECTIVE_WIDTH" = "40" ]; then
+        warn "hostapd refused 40MHz on 2.4GHz, retrying at 20MHz."
+        EFFECTIVE_WIDTH="20"
+        start_hostapd "$hb"; return
+    fi
     error "hostapd failed to start (check band/channel - try band 2)."
     return 1
 }
@@ -785,6 +867,9 @@ provision_openwrt() {
     ds_run uci set network.vaplan.proto=static
     ds_run uci set network.vaplan.ipaddr="$IP_GW"
     ds_run uci set network.vaplan.netmask=255.255.255.0
+    # A /64 from the router's ULA. Without a ULA or an IPv6 upstream this is
+    # inert, so it is safe on an OpenWrt that has neither.
+    ds_run uci set network.vaplan.ip6assign=64
     ds_run uci commit network
 
     ds_run uci set dhcp.vaplan=dhcp
@@ -792,10 +877,18 @@ provision_openwrt() {
     ds_run uci set dhcp.vaplan.start=100
     ds_run uci set dhcp.vaplan.limit=150
     ds_run uci set dhcp.vaplan.leasetime=12h
+    # Hand hotspot clients IPv6 too. ra_default 1: announce ourselves as the
+    # default router even though the only prefix is a ULA, since the upstream
+    # is NAT66 and never delegates a public one.
+    ds_run uci set dhcp.vaplan.ra=server
+    ds_run uci set dhcp.vaplan.dhcpv6=server
+    ds_run uci set dhcp.vaplan.ra_default=1
     ds_run uci commit dhcp
 
     ds_run /etc/init.d/network reload >/dev/null 2>&1
     ds_run /etc/init.d/dnsmasq restart >/dev/null 2>&1
+    # odhcpd sends the router advertisements; absent on images without IPv6.
+    ds_run /etc/init.d/odhcpd reload >/dev/null 2>&1
 
     # Most Android kernels lack nf_tables (fw4 fails) but have x_tables, so we
     # rely on iptables-legacy here.
@@ -843,6 +936,9 @@ config_network_bridged() {
 
     # Neutral host bridge (no IP - the container owns all L3).
     "$IP" link add name "$VAP_BRIDGE" type bridge || { error "Failed to create $VAP_BRIDGE"; return 1; }
+    # No IP has to hold for IPv6 too: Android leaves accept_ra at 2, so the host
+    # would take an address and a default route from the container's own RAs.
+    echo 1 > "/proc/sys/net/ipv6/conf/$VAP_BRIDGE/disable_ipv6" 2>/dev/null || true
     ip_up_retry "$VAP_BRIDGE"
 
     # veth: host side joins the bridge, peer crosses into the container.
@@ -987,6 +1083,9 @@ cmd_start() {
         log "  SSID     : $SSID (${BAND}GHz, channel $CHANNEL, ${EFFECTIVE_WIDTH}MHz)"
         log "  Upstream : container '$CONTAINER' via $VAP_BRIDGE -> $VAP_PORT"
         log "  LAN      : served by the container ($IP_GW)"
+        # The container NATs the clients, so their traffic reaches the host
+        # from Droidspaces' own NAT subnets.
+        ttl_label="TTL fix  "; ttl_src="$DS_NAT_NET"; ttl_src6="$DS_NAT_NET6"
     else
         # --- Routed mode: classic VirtualAP L3 ---
         resolve_upstream || exit 1
@@ -1001,10 +1100,22 @@ cmd_start() {
         log "  SSID    : $SSID (${BAND}GHz, channel $CHANNEL, ${EFFECTIVE_WIDTH}MHz)"
         log "  Gateway : $IP_GW (static - never changes)"
         log "  Upstream: ${UPSTREAM_IFACE_RESOLVED:-$UPSTREAM} (table $UPSTREAM_TABLE)"
+        ttl_label="TTL fix "; ttl_src="$IP_NET"; ttl_src6=""
+    fi
+
+    # Clear first, so switching the option off takes effect on a restart.
+    ttl_clear
+    if [ "$TTL_FIX" = "1" ]; then
+        if ttl_apply "$ttl_src" "$ttl_src6"; then
+            log "  $ttl_label: forwarded packets leave with TTL 64"
+        else
+            warn "TTL fix is not available: the kernel or iptables lacks the TTL target. Continuing without it."
+        fi
     fi
 }
 
 cmd_stop() {
+    ttl_clear
     if $GREP -q '^mode=bridged' "$STATE_FILE" 2>/dev/null; then
         teardown_bridged
     else
@@ -1093,13 +1204,13 @@ cmd_containers() {
 
 cmd_caps() {
     # 5GHz channel-width capabilities of the Wi-Fi chip, for the app to grey out
-    # unsupported width options. 20MHz is always available (not reported). 2.4GHz
-    # is fixed to 20MHz by policy regardless of these.
+    # unsupported width options. 20MHz is always available (not reported).
     local ht40=0 vht=0
     phy_supports_ht40 && ht40=1
     phy_supports_vht  && vht=1
     $ECHO "ht40=$ht40"
     $ECHO "vht=$vht"
+    if ttl_supported; then $ECHO "ttl=1"; else $ECHO "ttl=0"; fi
 }
 
 # --- Main ---
@@ -1117,7 +1228,8 @@ print_usage() {
     $ECHO "  -o <iface>     Upstream interface, or 'auto' (default: auto)"
     $ECHO "  -b <band>      2 = 2.4GHz (default), 5 = 5GHz"
     $ECHO "  -c <channel>   Channel (auto-picked / STA-followed when omitted)"
-    $ECHO "  -W <width>     Channel width: auto (default), 20, 40, 80 (5GHz only)"
+    $ECHO "  -W <width>     Channel width: auto (default), 20, 40, or 80 (80 is 5GHz"
+    $ECHO "                 only; on 2.4GHz auto means 20)"
     $ECHO "  -g <gateway>   Custom gateway IP (default: 192.168.42.1)"
     $ECHO "  -d <dns>       Comma-separated list of upstream DNS servers"
     $ECHO "  -w <iface>     Physical WiFi interface (default: wlan0)"
@@ -1128,6 +1240,9 @@ print_usage() {
     $ECHO "                 1=on); forced on for wpa2wpa3, required for wpa3"
     $ECHO "  -K <container> Managed mode: hand the AP's LAN to a Droidspaces"
     $ECHO "                 container (it owns DHCP/DNS/NAT). Disables -o/-g/-d."
+    $ECHO "  -T <0|1>       TTL fix: forwarded packets leave with TTL 64, so they"
+    $ECHO "                 look like the phone's own (0=off [default], 1=on)."
+    $ECHO "                 Needs the kernel's TTL target; skipped when missing."
     $ECHO ""
     $ECHO "Saved settings in $CONF_FILE are reused when flags are omitted."
 }
@@ -1138,7 +1253,7 @@ COMMAND="$1"
 # Saved config provides defaults; CLI flags override
 load_conf
 
-while getopts "s:p:o:b:c:W:w:g:d:H:A:M:K:h" opt 2>/dev/null; do
+while getopts "s:p:o:b:c:W:w:g:d:H:A:M:K:T:h" opt 2>/dev/null; do
     case $opt in
         s) SSID="$OPTARG" ;;
         p) PASSWORD="$OPTARG" ;;
@@ -1153,6 +1268,7 @@ while getopts "s:p:o:b:c:W:w:g:d:H:A:M:K:h" opt 2>/dev/null; do
         A) SECURITY="$OPTARG" ;;
         M) PMF="$OPTARG" ;;
         K) CONTAINER="$OPTARG" ;;
+        T) TTL_FIX="$OPTARG" ;;
         h) print_usage; exit 0 ;;
         *) print_usage; exit 1 ;;
     esac

@@ -13,6 +13,7 @@ data class APConfig(
     val hidden: Boolean = false,
     val security: String = "wpa2",   // open | wpawpa2 | wpa2 | wpa2wpa3 | wpa3
     val pmf: Boolean = false,        // Protected Management Frames (wpa2 only)
+    val ttlFix: Boolean = false,     // forwarded packets leave with TTL 64
     val containerMode: Boolean = false,
     val containerName: String = ""
 ) {
@@ -32,7 +33,7 @@ data class APConfig(
             password = prefs.apPassword,
             band = prefs.apBand,
             channel = validChannelForBand(prefs.apBand, prefs.apChannel),
-            width = prefs.apWidth,
+            width = validWidthForBand(prefs.apBand, prefs.apWidth),
             upstream = prefs.apUpstream,
             // Normalize a legacy stored default to blank so it shows as a hint.
             gateway = prefs.apGateway.takeUnless { it == DEFAULT_GATEWAY } ?: "",
@@ -40,9 +41,17 @@ data class APConfig(
             hidden = prefs.apHidden,
             security = prefs.apSecurity,
             pmf = prefs.apPmf,
+            ttlFix = prefs.apTtlFix,
             containerMode = prefs.apContainerMode,
             containerName = prefs.apContainer
         )
+
+        /** Widths the band can carry. 80 MHz only exists on 5 GHz. */
+        fun widthsForBand(band: String): List<String> =
+            if (band == "5") listOf("auto", "20", "40", "80") else listOf("auto", "20", "40")
+
+        fun validWidthForBand(band: String, width: String): String =
+            if (width in widthsForBand(band)) width else "auto"
 
         fun validChannelForBand(band: String, channel: String): String {
             if (channel.isBlank()) return ""
