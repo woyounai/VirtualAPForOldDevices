@@ -62,6 +62,10 @@ apk add --no-cache build-base linux-headers pkgconf \
 # by the backend scripts for reliable coreutils (Android's toybox is flaky).
 echo "### Staging static busybox"
 cp /bin/busybox.static "$OUT/busybox"
+for applet in flock setsid sh; do
+    "$OUT/busybox" --list | grep -qx "$applet" || {
+        echo "busybox-static is missing $applet, required by hotspot idle shutdown"; exit 1; }
+done
 strip "$OUT/busybox" 2>/dev/null || true
 
 # --- hostapd ---------------------------------------------------------------

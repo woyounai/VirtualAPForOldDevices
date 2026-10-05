@@ -19,6 +19,52 @@ traffic goes: mobile data, Wi-Fi, or a VPN.
 - **Hide tethering from your operator** with the optional TTL fix, on kernels that
   support it.
 
+## Hotspot limits and automatic shutdown
+
+The Android app includes **Maximum connected devices** (default 10) and
+**Turn off when unused** (enabled by default). The latter stops the hotspot
+after 10 continuous minutes with no connected devices, including after the
+last device disconnects. Connecting a device resets the timer. The monitor
+runs independently of the app and checks every five seconds; a failed status
+query resets the timer instead of risking a shutdown of active clients.
+Device suspend can delay the next check until Android resumes execution.
+Both features work in interface and container-managed modes. Automatic shutdown
+stops VirtualAP and cleans up its networking, leaving the container running.
+
+For CLI use, set these keys in `ap.conf`, or pass `start -I 600 -N 10`:
+
+```sh
+IDLE_TIMEOUT='600'  # 600 enables the ten-minute timer; 0 disables it
+MAX_CLIENTS='10'    # 1-2007; the phone's driver may impose a lower limit
+SECURITY='wpawpa2' # optional WPA/WPA2 compatibility with CCMP and TKIP
+```
+
+The backend first loads `/data/local/virtualap/ap.conf`, then applies overrides
+from `/data/local/ap.conf` if present. A shared file containing only the security
+key therefore inherits the original SSID and password. Explicit empty values
+still override the originals. Settings are saved to the shared file if it
+exists, otherwise to the original path. CLI flags, including the app's selected
+values, take precedence. Restart the hotspot after changing settings.
+Keep both config files root-owned and not writable by other users: they are
+loaded as shell files by the root backend.
+
+Startup now waits up to 30 seconds for hostapd to report `state=ENABLED`.
+A live process that is still initializing is not reported as a running hotspot.
+The device limit is enforced by hostapd's `max_num_sta`, and applies to all
+security modes. WPA/WPA2 compatibility still requires TKIP support in the
+phone's driver and the clients.
+
+Run `python3 -m unittest discover -s tests -v` for the security and lifecycle
+regression tests. They use isolated files, mock radio/network operations and a
+virtual clock to exercise the full ten-minute timer without changing host
+routing. CI runs them before building the APK. On a Linux development machine
+with a C compiler, make and static OpenSSL development libraries, run
+`python3 tests/check_hostapd_native.py` after initializing the hostapd submodule.
+It builds a temporary driverless hostapd, checks each security mode and verifies
+that the next station is rejected at the configured limit and allowed again
+after a station disconnects. Android 8 and device-driver testing still require
+a real rooted phone.
+
 ## Managed mode: OpenWrt runs your hotspot
 
 This is what sets VirtualAP apart. Hand the hotspot to an OpenWrt container running in

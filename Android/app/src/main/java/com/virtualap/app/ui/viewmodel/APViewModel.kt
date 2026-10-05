@@ -50,7 +50,8 @@ class APViewModel(application: Application) : AndroidViewModel(application) {
                 prefs.saveApConfig(
                     cfg.ssid, cfg.password, cfg.band, cfg.channel, cfg.width,
                     cfg.upstream, cfg.gateway, cfg.dnsServers, cfg.hidden,
-                    cfg.security, cfg.pmf, cfg.ttlFix, cfg.containerMode, cfg.containerName
+                    cfg.security, cfg.pmf, cfg.ttlFix, cfg.containerMode, cfg.containerName,
+                    cfg.autoShutdown, cfg.maxClients
                 )
             }
         }

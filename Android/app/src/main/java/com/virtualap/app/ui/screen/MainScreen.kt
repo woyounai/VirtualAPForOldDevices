@@ -585,8 +585,34 @@ private fun AdvancedCard(vm: APViewModel) {
             )
         }
 
-        // Last, because the two above are radio settings and this one is about
-        // routing. It needs kernel support, so it is greyed out without it.
+        OutlinedTextField(
+            value = vm.config.maxClients,
+            onValueChange = { vm.config = vm.config.copy(maxClients = it) },
+            label = { Text(stringResource(R.string.max_clients_label)) },
+            supportingText = {
+                Text(stringResource(
+                    if (vm.config.maxClientsValid()) R.string.max_clients_desc else R.string.max_clients_error
+                ))
+            },
+            isError = !vm.config.maxClientsValid(),
+            singleLine = true,
+            enabled = editable,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+            modifier = Modifier.fillMaxWidth(),
+            shape = fieldShape,
+            colors = DsTextFieldDefaults.colors()
+        )
+
+        ToggleCard(
+            title = stringResource(R.string.auto_shutdown_label),
+            description = stringResource(R.string.auto_shutdown_desc),
+            checked = vm.config.autoShutdown,
+            onCheckedChange = { vm.config = vm.config.copy(autoShutdown = it) },
+            enabled = editable,
+            icon = Icons.Default.Timer
+        )
+
+        // Routing needs kernel support, so it is greyed out without it.
         ToggleCard(
             title = stringResource(R.string.ttl_fix_label),
             description = stringResource(

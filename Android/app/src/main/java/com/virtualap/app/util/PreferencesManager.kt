@@ -101,6 +101,14 @@ class PreferencesManager private constructor(context: Context) {
         get() = prefs.getBoolean(Constants.KEY_AP_TTL_FIX, false)
         set(value) { prefs.edit().putBoolean(Constants.KEY_AP_TTL_FIX, value).apply() }
 
+    var apAutoShutdown: Boolean
+        get() = prefs.getBoolean(Constants.KEY_AP_AUTO_SHUTDOWN, true)
+        set(value) { prefs.edit().putBoolean(Constants.KEY_AP_AUTO_SHUTDOWN, value).apply() }
+
+    var apMaxClients: String
+        get() = prefs.getString(Constants.KEY_AP_MAX_CLIENTS, "10") ?: "10"
+        set(value) { prefs.edit().putString(Constants.KEY_AP_MAX_CLIENTS, value).apply() }
+
     var apContainerMode: Boolean
         get() = prefs.getBoolean(Constants.KEY_AP_CONTAINER_MODE, false)
         set(value) { prefs.edit().putBoolean(Constants.KEY_AP_CONTAINER_MODE, value).apply() }
@@ -120,14 +128,14 @@ class PreferencesManager private constructor(context: Context) {
 
     /**
      * Persist the full AP config in one batched edit. The viewmodel writes the
-     * whole config on every change, so this avoids 13 separate apply() calls
+     * whole config on every change, so this avoids separate apply() calls
      * (one per field) on each keystroke.
      */
     fun saveApConfig(
         ssid: String, password: String, band: String, channel: String, width: String,
         upstream: String, gateway: String, dnsServers: String, hidden: Boolean,
         security: String, pmf: Boolean, ttlFix: Boolean, containerMode: Boolean,
-        container: String
+        container: String, autoShutdown: Boolean, maxClients: String
     ) {
         prefs.edit()
             .putString(Constants.KEY_AP_SSID, ssid)
@@ -142,6 +150,8 @@ class PreferencesManager private constructor(context: Context) {
             .putString(Constants.KEY_AP_SECURITY, security)
             .putBoolean(Constants.KEY_AP_PMF, pmf)
             .putBoolean(Constants.KEY_AP_TTL_FIX, ttlFix)
+            .putBoolean(Constants.KEY_AP_AUTO_SHUTDOWN, autoShutdown)
+            .putString(Constants.KEY_AP_MAX_CLIENTS, maxClients)
             .putBoolean(Constants.KEY_AP_CONTAINER_MODE, containerMode)
             .putString(Constants.KEY_AP_CONTAINER, container)
             .apply()

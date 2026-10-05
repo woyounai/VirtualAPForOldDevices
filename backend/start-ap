@@ -72,6 +72,8 @@ PMF="0"
 # Rewrite the TTL of forwarded packets so tethered traffic looks like the phone's
 # own to the operator. Needs the kernel's TTL target, so it is best effort.
 TTL_FIX="0"
+IDLE_TIMEOUT="600"
+MAX_CLIENTS="10"
 
 # --- Droidspaces container integration (managed mode) ---
 # When CONTAINER is set: ap0 becomes a bridged port on VAP_BRIDGE, a veth peer
@@ -134,7 +136,12 @@ error() { $ECHO "[ERROR] $1";  $ECHO "[$($DATE '+%Y-%m-%d %H:%M:%S')] [ERROR] $1
 # --- Config persistence ---
 
 load_conf() {
-    [ -f "$CONF_FILE" ] && . "$CONF_FILE"
+    # A partial shared config must inherit the original SSID and password.
+    local selected="$CONF_FILE"
+    [ -f "$BASE_DIR/ap.conf" ] && . "$BASE_DIR/ap.conf"
+    CONF_FILE="$selected"
+    [ "$CONF_FILE" != "$BASE_DIR/ap.conf" ] && [ -f "$CONF_FILE" ] && . "$CONF_FILE"
+    return 0
 }
 
 # Escape single quotes so a password with " or $ can't break out of the conf file.
@@ -155,6 +162,8 @@ HIDDEN='$(sq "$HIDDEN")'
 SECURITY='$(sq "$SECURITY")'
 PMF='$(sq "$PMF")'
 TTL_FIX='$(sq "$TTL_FIX")'
+IDLE_TIMEOUT='$(sq "$IDLE_TIMEOUT")'
+MAX_CLIENTS='$(sq "$MAX_CLIENTS")'
 CONTAINER='$(sq "$CONTAINER")'
 EOF
 }
@@ -288,7 +297,7 @@ ensure_5g_ir() {
     cc=$(cmd wifi get-country-code 2>/dev/null | $SED -n 's/.*= *\([A-Za-z][A-Za-z]\).*/\1/p' | $TR 'a-z' 'A-Z')
     cc="${cc:-US}"
     warn "5GHz channel $CHANNEL is NO-IR (driver in world regdomain) - setting driver country to $cc."
-    hostapd_cli -p "$WPA_CTRL_DIR" -i "$PHY_IFACE" raw "DRIVER COUNTRY $cc" >/dev/null 2>&1 &
+    hostapd_cli -p "$WPA_CTRL_DIR" -i "$PHY_IFACE" raw "DRIVER COUNTRY $cc" 9>&- >/dev/null 2>&1 &
     $SLEEP 1
     PHY_INFO_CACHE=""
     if chan_no_ir "$CHANNEL"; then
@@ -480,6 +489,8 @@ write_resolv_conf() {
 # --- Teardown (mirrors setup exactly; every step tolerant) ---
 
 stop_daemons() {
+    [ -f "$RUN_DIR/idle-watch.pid" ] && $KILL "$($CAT "$RUN_DIR/idle-watch.pid")" 2>/dev/null
+    $RM -f "$RUN_DIR/idle-watch.pid" "$RUN_DIR/session"
     [ -f "$RUN_DIR/hostapd.pid" ] && $KILL "$($CAT "$RUN_DIR/hostapd.pid")" 2>/dev/null
     [ -f "$RUN_DIR/dnsmasq.pid" ] && $KILL "$($CAT "$RUN_DIR/dnsmasq.pid")" 2>/dev/null
     $RM -f "$RUN_DIR/hostapd.pid" "$RUN_DIR/dnsmasq.pid" \
@@ -742,6 +753,7 @@ country_code=US
 ieee80211d=1
 $sec
 ignore_broadcast_ssid=$HIDDEN
+max_num_sta=$MAX_CLIENTS
 EOF
 }
 
@@ -750,16 +762,22 @@ EOF
 # the failure reason would otherwise be lost); stderr is appended too to catch
 # any pre-daemonize config errors. Log is truncated per start.
 #
-# Liveness here is a fixed 2s sleep + PID check, not a poll. With ieee80211d=1
-# hostapd can sit in COUNTRY_UPDATE ~5s, so a death *after* the 2s check (e.g. a
-# late channel/width rejection by the firmware) is not caught here - the status
-# command and hostapd.log surface it instead. Polling was tried and removed: it
-# slowed down the common happy-path start for no real-world gain.
+# COUNTRY_UPDATE can outlive the daemon launch, so wait for an enabled radio.
 hostapd_try() {
+    local tries=0 status pid
     : > "$HOSTAPD_LOG" 2>/dev/null
-    "$HOSTAPD" -B -t -f "$HOSTAPD_LOG" -P "$RUN_DIR/hostapd.pid" "$RUN_DIR/hostapd.conf" 2>>"$HOSTAPD_LOG" || return 1
-    $SLEEP 2
-    [ -f "$RUN_DIR/hostapd.pid" ] && $KILL -0 "$($CAT "$RUN_DIR/hostapd.pid")" 2>/dev/null
+    "$HOSTAPD" -B -t -f "$HOSTAPD_LOG" -P "$RUN_DIR/hostapd.pid" "$RUN_DIR/hostapd.conf" 9>&- 2>>"$HOSTAPD_LOG" || return 1
+    while [ "$tries" -lt 30 ]; do
+        pid=$($CAT "$RUN_DIR/hostapd.pid" 2>/dev/null)
+        if [ -n "$pid" ]; then
+            $KILL -0 "$pid" 2>/dev/null || return 1
+            status=$(hostapd_cli -p "$RUN_DIR/hostapd" -i "$AP_IFACE" status 2>/dev/null)
+            $PRINTF '%s\n' "$status" | $GREP -qx 'state=ENABLED' && return 0
+        fi
+        tries=$((tries + 1)); $SLEEP 1
+    done
+    error "hostapd did not reach ENABLED within 30 seconds."
+    return 1
 }
 
 # Generate the conf at the picked width and launch hostapd once. pick_width has
@@ -834,7 +852,7 @@ EOF
 
     log "Starting dnsmasq..."
     : > "$DNSMASQ_LOG" 2>/dev/null
-    if ! "$DNSMASQ" -C "$RUN_DIR/dnsmasq.conf"; then
+    if ! "$DNSMASQ" -C "$RUN_DIR/dnsmasq.conf" 9>&-; then
         error "dnsmasq failed to start"
         return 1
     fi
@@ -1015,11 +1033,83 @@ teardown_bridged() {
 
 # --- Subcommands ---
 
+# The same lock protects a restart from a timeout belonging to the old session.
+run_locked() (
+    "$BUSYBOX" flock -x 9 || { error "Unable to lock hotspot control."; exit 1; }
+    "$@"
+) 9>"$RUN_DIR/control.lock"
+
+client_count() {
+    local status count
+    status=$(hostapd_cli -p "$RUN_DIR/hostapd" -i "$AP_IFACE" status 2>/dev/null) || return 1
+    $PRINTF '%s\n' "$status" | $GREP -qx 'state=ENABLED' || return 1
+    count=$($PRINTF '%s\n' "$status" | $SED -n 's/^num_sta\[0\]=//p')
+    case "$count" in ''|*[!0-9]*) return 1 ;; esac
+    $PRINTF '%s\n' "$count"
+}
+
+# /proc/uptime is monotonic and includes suspend, unlike the wall clock.
+uptime_seconds() { $CUT -d. -f1 /proc/uptime; }
+
+register_idle_watch() {
+    [ "$($CAT "$RUN_DIR/session" 2>/dev/null)" = "$1" ] || return 1
+    $ECHO "$$" > "$RUN_DIR/idle-watch.pid"
+}
+
+cmd_watch() {
+    local session="$1" idle_since now clients
+    [ "$IDLE_TIMEOUT" = "600" ] || return 0
+    run_locked register_idle_watch "$session" || return 0
+    trap '[ "$($CAT "$RUN_DIR/idle-watch.pid" 2>/dev/null)" = "$$" ] && $RM -f "$RUN_DIR/idle-watch.pid"' EXIT
+    idle_since=""
+    while [ "$($CAT "$RUN_DIR/session" 2>/dev/null)" = "$session" ]; do
+        $KILL -0 "${session##*:}" 2>/dev/null || return 0
+        now=$(uptime_seconds)
+        if clients=$(client_count); then
+            if [ "$clients" -gt 0 ]; then
+                idle_since=""
+            elif [ -z "$idle_since" ]; then
+                idle_since="$now"
+            elif [ $((now - idle_since)) -ge 600 ]; then
+                "$BUSYBOX" sh "$0" idle-stop "$session" 9>&- && return 0
+                idle_since=""
+            fi
+        else
+            # A control socket failure is not evidence that no one is connected.
+            idle_since=""
+        fi
+        $SLEEP 5
+    done
+}
+
+cmd_idle_stop() {
+    local clients
+    [ "$($CAT "$RUN_DIR/session" 2>/dev/null)" = "$1" ] || return 0
+    clients=$(client_count) || return 1
+    [ "$clients" -eq 0 ] || return 1
+    log "No connected devices for 10 minutes, stopping hotspot."
+    cmd_stop
+}
+
+start_idle_watch() {
+    local session="$$:$($CAT "$RUN_DIR/hostapd.pid")"
+    $ECHO "$session" > "$RUN_DIR/session"
+    [ "$IDLE_TIMEOUT" = "600" ] || return 0
+    "$BUSYBOX" setsid "$BUSYBOX" sh "$0" watch "$session" </dev/null >/dev/null 2>&1 9>&- &
+}
+
 cmd_start() {
     # One session per file: nothing reads ap.log but a person with a shell, and
     # without this it grows for as long as the phone lives.
     : > "$LOG_FILE"
     [ -z "$SSID" ] && { error "SSID not set (use -s or save a config first)"; exit 1; }
+    case "$IDLE_TIMEOUT" in 0|600) ;; *) error "Idle timeout must be 0 or 600 seconds."; exit 1 ;; esac
+    case "$MAX_CLIENTS" in
+        ''|*[!0-9]*|?????*) error "Max clients must be 1-2007."; exit 1 ;;
+    esac
+    if [ "$MAX_CLIENTS" -lt 1 ] || [ "$MAX_CLIENTS" -gt 2007 ]; then
+        error "Max clients must be 1-2007."; exit 1
+    fi
     # Open networks carry no passphrase; WPA modes use a WPA-PSK/SAE passphrase,
     # which the standard (and hostapd) bound to 8-63 characters.
     if [ "$SECURITY" != "open" ]; then
@@ -1112,6 +1202,7 @@ cmd_start() {
             warn "TTL fix is not available: the kernel or iptables lacks the TTL target. Continuing without it."
         fi
     fi
+    start_idle_watch
 }
 
 cmd_stop() {
@@ -1134,10 +1225,14 @@ cmd_status() {
         else
             [ -f "$RUN_DIR/dnsmasq.pid" ] && $KILL -0 "$($CAT "$RUN_DIR/dnsmasq.pid")" 2>/dev/null && dnsmasq_state="running"
         fi
-        [ "$hostapd_state" = "running" ] && running=1
-        # hostapd's own list, not the driver's: MediaTek's gen4m has no
-        # dump_station, so `iw station dump` is always empty there.
-        clients=$(hostapd_cli -p "$RUN_DIR/hostapd" -i "$AP_IFACE" list_sta 2>/dev/null | $GREP -c ':')
+        if [ "$hostapd_state" = "running" ]; then
+            if clients=$(client_count); then
+                running=1
+            else
+                hostapd_state="initializing"
+                clients=0
+            fi
+        fi
     fi
 
     $ECHO "running=$running"
@@ -1238,6 +1333,8 @@ print_usage() {
     $ECHO "                 wpawpa2: WPA/WPA2 compatibility with CCMP and TKIP"
     $ECHO "  -M <0|1>       Protected Management Frames for wpa2 (0=off [default],"
     $ECHO "                 1=on); forced on for wpa2wpa3, required for wpa3"
+    $ECHO "  -I <0|600>     Stop after 600 seconds without clients (default); 0=off"
+    $ECHO "  -N <1-2007>    Maximum connected devices (default: 10; driver may allow fewer)"
     $ECHO "  -K <container> Managed mode: hand the AP's LAN to a Droidspaces"
     $ECHO "                 container (it owns DHCP/DNS/NAT). Disables -o/-g/-d."
     $ECHO "  -T <0|1>       TTL fix: forwarded packets leave with TTL 64, so they"
@@ -1253,7 +1350,7 @@ COMMAND="$1"
 # Saved config provides defaults; CLI flags override
 load_conf
 
-while getopts "s:p:o:b:c:W:w:g:d:H:A:M:K:T:h" opt 2>/dev/null; do
+while getopts "s:p:o:b:c:W:w:g:d:H:A:M:K:T:I:N:h" opt 2>/dev/null; do
     case $opt in
         s) SSID="$OPTARG" ;;
         p) PASSWORD="$OPTARG" ;;
@@ -1269,6 +1366,8 @@ while getopts "s:p:o:b:c:W:w:g:d:H:A:M:K:T:h" opt 2>/dev/null; do
         M) PMF="$OPTARG" ;;
         K) CONTAINER="$OPTARG" ;;
         T) TTL_FIX="$OPTARG" ;;
+        I) IDLE_TIMEOUT="$OPTARG" ;;
+        N) MAX_CLIENTS="$OPTARG" ;;
         h) print_usage; exit 0 ;;
         *) print_usage; exit 1 ;;
     esac
@@ -1280,8 +1379,10 @@ if ! calculate_subnet "$IP_GW"; then
 fi
 
 case "$COMMAND" in
-    start)      cmd_start ;;
-    stop)       cmd_stop ;;
+    start)      run_locked cmd_start ;;
+    stop)       run_locked cmd_stop ;;
+    watch)      cmd_watch "$1" ;;
+    idle-stop)  run_locked cmd_idle_stop "$1" ;;
     status)     cmd_status ;;
     leases)     cmd_leases ;;
     interfaces) cmd_interfaces ;;

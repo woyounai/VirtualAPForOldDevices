@@ -14,6 +14,8 @@ data class APConfig(
     val security: String = "wpa2",   // open | wpawpa2 | wpa2 | wpa2wpa3 | wpa3
     val pmf: Boolean = false,        // Protected Management Frames (wpa2 only)
     val ttlFix: Boolean = false,     // forwarded packets leave with TTL 64
+    val autoShutdown: Boolean = true,
+    val maxClients: String = "10",
     val containerMode: Boolean = false,
     val containerName: String = ""
 ) {
@@ -22,7 +24,12 @@ data class APConfig(
 
     /** Everything start-ap will reject on its own, checked before we shell out. */
     fun isValid(): Boolean =
-        ssid.isNotBlank() && passwordValid() && (!containerMode || containerName.isNotBlank())
+        ssid.isNotBlank() && passwordValid() && maxClientsValid() &&
+            (!containerMode || containerName.isNotBlank())
+
+    fun maxClientsValid(): Boolean =
+        maxClients.isNotEmpty() && maxClients.all { it in '0'..'9' } &&
+            maxClients.length <= 4 && (maxClients.toIntOrNull() ?: 0) in 1..2007
 
     companion object {
         /** Default AP/LAN gateway when the gateway field is left blank. */
@@ -42,6 +49,8 @@ data class APConfig(
             security = prefs.apSecurity,
             pmf = prefs.apPmf,
             ttlFix = prefs.apTtlFix,
+            autoShutdown = prefs.apAutoShutdown,
+            maxClients = prefs.apMaxClients,
             containerMode = prefs.apContainerMode,
             containerName = prefs.apContainer
         )

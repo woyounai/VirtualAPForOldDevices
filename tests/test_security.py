@@ -41,7 +41,7 @@ class SecurityTests(unittest.TestCase):
     def config(self, mode, pmf="1", bridge="", band="2", width="20"):
         self.shell(
             f"SECURITY={shlex.quote(mode)}; PMF={pmf}; PASSWORD=abcdefgh; "
-            f"SSID=test; CHANNEL=36; BAND={band}; EFFECTIVE_WIDTH={width}; "
+            f"SSID=test; CHANNEL={'36' if band == '5' else '6'}; BAND={band}; EFFECTIVE_WIDTH={width}; "
             f"write_hostapd_conf {shlex.quote(bridge)}"
         )
         return dict(
@@ -106,7 +106,8 @@ class SecurityTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 self.config(mode)
                 self.base.joinpath("run.state").write_text("ssid=test\n")
-                output = self.shell('printf "%s\\n" "$$" > "$RUN_DIR/hostapd.pid"; '
+                output = self.shell('hostapd_cli() { printf "state=ENABLED\\nnum_sta[0]=0\\n"; }; '
+                                    'printf "%s\\n" "$$" > "$RUN_DIR/hostapd.pid"; '
                                     'SECURITY=wpa3; cmd_status')
                 self.assertIn(f"security={mode}", output.splitlines())
 
